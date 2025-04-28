@@ -1,7 +1,8 @@
 # Start global logging - by David Steinhart
-New-item -itemtype Directory -Path C:\StrongMapping -ErrorAction SilentlyContinue
+$logpath = "C:\StrongMapping"
+New-item -itemtype Directory -Path $logpath -ErrorAction SilentlyContinue
 try {
-    Start-Transcript -Path "C:\StrongMapping\strong_cert_mapping_script_$((Get-Date).tostring("MMM_dd_yyyy_hh_mm_ss_tt")).txt" -Append
+    Start-Transcript -Path "$logpath\strong_cert_mapping_script_$((Get-Date).tostring("MMM_dd_yyyy_hh_mm_ss_tt")).txt" -Append
 } catch {
     Write-Output "Failed to start logging. Exiting."
     exit (1)
@@ -130,7 +131,7 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
     # Clear variables
     $variables = @("guid","sAMAccountName","deviceName","subjectMatch","CAs","issuedCerts","cert","issuer","issuerClean","serialNumber","serialBytes","serialReversed","skiExtension","ski","sha1Provider","publicKeyBytes","sha1Hash","sha1PublicKey","altSecurityIdentities")
     $variables | % {
-        Clear-Variable -Name $_
+        Clear-Variable -Name $_ -ErrorAction SilentlyContinue
     }
     
     $guid = $device.DeviceId
@@ -166,8 +167,8 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
     $CAs = Get-CertificationAuthority
 
     # Query issued certs that match device
-    Clear-Variable -name "issuedCerts"
-    Clear-Variable -name "cert"
+    Clear-Variable -name "issuedCerts" -ErrorAction SilentlyContinue
+    Clear-Variable -name "cert" -ErrorAction SilentlyContinue
     try {
         foreach ($certAuthority in $CAs) {
             $issuedCerts = foreach ($cert in (Get-IssuedRequest -CertificationAuthority $certAuthority -Property SerialNumber -Filter "CommonName -eq $($deviceName)")) {
@@ -183,11 +184,11 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
 
     if ($issuedCerts) {
         # Pick the latest cert if multiple
-        Clear-Variable -name "CertRequest"
+        Clear-Variable -name "CertRequest" -ErrorAction SilentlyContinue
         $certRequest = $issuedCerts | Sort-Object NotBefore -Descending | Select-Object -First 1
 
         # Use Receive-Certificate to get detailed info on the issued certificate
-        Clear-Variable -name "cert"
+        Clear-Variable -name "cert" -ErrorAction SilentlyContinue
         $cert = Receive-Certificate -RequestRow $certRequest -ErrorAction SilentlyContinue
     } elseif (!$issuedCerts) {
         # Write output if no matching certs found
@@ -198,18 +199,18 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
     if ($cert) {
         # Extract and build contents for the AltSecurityIdentites attribute
         # Issuer
-        Clear-Variable -name "issuer"
-        Clear-Variable -name "issuerClean"
+        Clear-Variable -name "issuer" -ErrorAction SilentlyContinue
+        Clear-Variable -name "issuerClean" -ErrorAction SilentlyContinue
         $issuer = $cert.IssuerName.Name
         $issuerClean = ($issuer -replace '^CN=', '' -replace ' ', '').Trim()
 
         # Serial Number
-        Clear-Variable -name "serialNumber"
+        Clear-Variable -name "serialNumber" -ErrorAction SilentlyContinue
         $serialNumber = $cert.SerialNumber
 
         # Build Reverse Serial Number
-        Clear-Variable -name "serialBytes"
-        Clear-Variable -name "serialReversed"
+        Clear-Variable -name "serialBytes" -ErrorAction SilentlyContinue
+        Clear-Variable -name "serialReversed" -ErrorAction SilentlyContinue
         $serialBytes = for ($i = 0; $i -lt $serialNumber.Length; $i += 2) { $serialNumber.Substring($i, 2) }
         $serialBytes = @()
         for ($i = 0; $i -lt $serialNumber.Length; $i += 2) {
@@ -219,8 +220,8 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
         $serialReversed = $serialBytes -join ""
 
         # Build Subject Key Identifier (SKI)
-        Clear-Variable -name "skiExtension"
-        Clear-Variable -name "ski"
+        Clear-Variable -name "skiExtension" -ErrorAction SilentlyContinue
+        Clear-Variable -name "ski" -ErrorAction SilentlyContinue
         $skiExtension = $cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Key Identifier" }
         if ($skiExtension) {
             $ski = ($skiExtension.Format($false) -replace " ", "").ToLower()
@@ -230,17 +231,17 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
         }
 
         # Build SHA1 of Public Key
-        Clear-Variable -name "sha1Provider"
-        Clear-Variable -name "publicKeyBytes"
-        Clear-Variable -name "sha1Hash"
-        Clear-Variable -name "sha1PublicKey"
+        Clear-Variable -name "sha1Provider" -ErrorAction SilentlyContinue
+        Clear-Variable -name "publicKeyBytes" -ErrorAction SilentlyContinue
+        Clear-Variable -name "sha1Hash" -ErrorAction SilentlyContinue
+        Clear-Variable -name "sha1PublicKey" -ErrorAction SilentlyContinue
         $sha1Provider = [System.Security.Cryptography.SHA1]::Create()
         $publicKeyBytes = $cert.GetPublicKey()
         $sha1Hash = $sha1Provider.ComputeHash($publicKeyBytes)
         $sha1PublicKey = ($sha1Hash | ForEach-Object { $_.ToString("x2") }) -join ""
 
         # Combine the built output into single attribute ready for applying to dummy AD computer
-        Clear-Variable -name "altSecurityIdentities"
+        Clear-Variable -name "altSecurityIdentities" -ErrorAction SilentlyContinue
         $altSecurityIdentities = @()
         $altSecurityIdentities += "X509:<I>$issuerClean<SR>$serialReversed"
         if ($ski) {
@@ -264,7 +265,7 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
     try {
         if (($adDevice = Get-ADComputer -Filter "Name -eq `"$($guid)`"" -SearchBase $orgUnit)) {
             # If computer object exists, set attributes
-            $adDevice | Set-ADComputer -Replace @{"dNSHostName"="$($guid)";"servicePrincipalName"="host/$($guid)";"sAMAccountName"="$($sAMAccountName)";"description"="$($device.DisplayName)"} -Replace @{AltSecurityIdentities = $altSecurityIdentities}
+            $adDevice | Set-ADComputer -Replace @{"dNSHostName"="$($guid)";"servicePrincipalName"="host/$($guid)";"sAMAccountName"="$($sAMAccountName)";"description"="$($device.DisplayName)";AltSecurityIdentities = $altSecurityIdentities}
         } else {
             # Computer must not exist, create new and set attributes
             $adDevice = New-ADComputer -Name $guid -DNSHostName $guid -ServicePrincipalNames "host/$($guid)" -SAMAccountName $sAMAccountName -Description "$($device.DisplayName)" -Path $orgUnit -AccountPassword $NULL -PasswordNotRequired $False -PassThru
