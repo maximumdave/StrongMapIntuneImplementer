@@ -29,7 +29,7 @@ $defaultGroup = "AADJ Devices"
 
 # The organisational unit the devices and groups should sync to
 # Should be a dedicated OU used by this script only
-$orgUnit = "OU=AADJ Devices,DC=domain,DC=local"
+$orgUnit = "OU=AADJ Devices,OU=Computers,OU=domain,DC=local"
 
 # Device/group deletion policies
 $removeDeletedDevices = $true # Set to $false if you don't want the script to delete computer objects from AD
@@ -127,7 +127,7 @@ $aadGroups = @{} # To store group ID and name of all groups synced from AAD to A
 
 # Pull all AAD joined devices from all devices
 Write-Host "`nFetching all Azure AD joined devices..."
-foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| where-object {$_.deviceid -eq "b7d134b7-09e1-4e0a-9dbc-f2846410ca12"}#>)) {
+foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| where-object {$_.deviceid -eq "57258cd6-c7f7-441a-9389-248cbbe56d7e"}#>)) {
     # Clear variables
     $variables = @("guid","sAMAccountName","deviceName","subjectMatch","CAs","issuedCerts","cert","issuer","issuerClean","serialNumber","serialBytes","serialReversed","skiExtension","ski","sha1Provider","publicKeyBytes","sha1Hash","sha1PublicKey","altSecurityIdentities")
     $variables | % {
@@ -183,75 +183,90 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
 
 
     if ($issuedCerts) {
-        # Pick the latest cert if multiple
+        # Pick the latest cert if multiple. NO! Get them all for ease of transition!
         Clear-Variable -name "CertRequest" -ErrorAction SilentlyContinue
-        $certRequest = $issuedCerts | Sort-Object NotBefore -Descending | Select-Object -First 1
+        $certRequest = $issuedCerts #| Sort-Object NotBefore -Descending | Select-Object -First 1
 
         # Use Receive-Certificate to get detailed info on the issued certificate
         Clear-Variable -name "cert" -ErrorAction SilentlyContinue
-        $cert = Receive-Certificate -RequestRow $certRequest -ErrorAction SilentlyContinue
+        $certs = Receive-Certificate -RequestRow $certRequest -ErrorAction SilentlyContinue
     } elseif (!$issuedCerts) {
         # Write output if no matching certs found
         Write-Host "No certificates found in CA database for $deviceName."
     }
 
     # Do operations if cert is found
-    if ($cert) {
-        # Extract and build contents for the AltSecurityIdentites attribute
-        # Issuer
-        Clear-Variable -name "issuer" -ErrorAction SilentlyContinue
-        Clear-Variable -name "issuerClean" -ErrorAction SilentlyContinue
-        $issuer = $cert.IssuerName.Name
-        $issuerClean = ($issuer -replace '^CN=', '' -replace ' ', '').Trim()
+    if ($certs) {
+        $allAltSecID = New-Object System.Collections.Generic.List[object]
+        #Clear-Variable -name "allAltSecID" -erroraction SilentlyContinue
+        foreach ($cert in $certs){
+            # Extract and build contents for the AltSecurityIdentites attribute
+            # Issuer
+            Clear-Variable -name "issuer" -ErrorAction SilentlyContinue
+            Clear-Variable -name "issuerClean" -ErrorAction SilentlyContinue
+            $issuer = $cert.IssuerName.Name
+            $issuerClean = ($issuer -replace '^CN=', '' -replace ' ', '').Trim()
 
-        # Serial Number
-        Clear-Variable -name "serialNumber" -ErrorAction SilentlyContinue
-        $serialNumber = $cert.SerialNumber
+            # Serial Number
+            Clear-Variable -name "serialNumber" -ErrorAction SilentlyContinue
+            $serialNumber = $cert.SerialNumber
 
-        # Build Reverse Serial Number
-        Clear-Variable -name "serialBytes" -ErrorAction SilentlyContinue
-        Clear-Variable -name "serialReversed" -ErrorAction SilentlyContinue
-        $serialBytes = for ($i = 0; $i -lt $serialNumber.Length; $i += 2) { $serialNumber.Substring($i, 2) }
-        $serialBytes = @()
-        for ($i = 0; $i -lt $serialNumber.Length; $i += 2) {
-            $serialBytes += $serialNumber.Substring($i, 2)
+            # Build Reverse Serial Number
+            Clear-Variable -name "serialBytes" -ErrorAction SilentlyContinue
+            Clear-Variable -name "serialReversed" -ErrorAction SilentlyContinue
+            $serialBytes = for ($i = 0; $i -lt $serialNumber.Length; $i += 2) { $serialNumber.Substring($i, 2) }
+            $serialBytes = @()
+            for ($i = 0; $i -lt $serialNumber.Length; $i += 2) {
+                $serialBytes += $serialNumber.Substring($i, 2)
+            }
+            [Array]::Reverse($serialBytes)
+            $serialReversed = $serialBytes -join ""
+
+            # Build Subject Key Identifier (SKI)
+            Clear-Variable -name "skiExtension" -ErrorAction SilentlyContinue
+            Clear-Variable -name "ski" -ErrorAction SilentlyContinue
+            $skiExtension = $cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Key Identifier" }
+            if ($skiExtension) {
+                $ski = ($skiExtension.Format($false) -replace " ", "").ToLower()
+            } else {
+                Write-Host "No SKI found in certificate."
+                $ski = $null
+            }
+
+            # Build SHA1 of Public Key
+            Clear-Variable -name "sha1Provider" -ErrorAction SilentlyContinue
+            Clear-Variable -name "publicKeyBytes" -ErrorAction SilentlyContinue
+            Clear-Variable -name "sha1Hash" -ErrorAction SilentlyContinue
+            Clear-Variable -name "sha1PublicKey" -ErrorAction SilentlyContinue
+            $sha1Provider = [System.Security.Cryptography.SHA1]::Create()
+            $publicKeyBytes = $cert.GetPublicKey()
+            $sha1Hash = $sha1Provider.ComputeHash($publicKeyBytes)
+            $sha1PublicKey = ($sha1Hash | ForEach-Object { $_.ToString("x2") }) -join ""
+
+            # Combine the built output into single attribute ready for applying to dummy AD computer
+            Clear-Variable -name "altSecurityIdentities" -ErrorAction SilentlyContinue
+            $altSecurityIdentities = @()
+            $altSecurityIdentities += "X509:<I>$issuerClean<SR>$serialReversed"
+            if ($ski) {
+                $altSecurityIdentities += "X509:<SKI>$ski"
+            }
+            $altSecurityIdentities += "X509:<SHA1-PUKEY>$sha1PublicKey"
+
+            # Write output to show built attribute
+            Write-Host "Generated AltSecurityIdentities entries:"
+            $altSecurityIdentities | ForEach-Object { Write-Host $_ }
+            $allAltSecID.add($altSecurityIdentities)
         }
-        [Array]::Reverse($serialBytes)
-        $serialReversed = $serialBytes -join ""
-
-        # Build Subject Key Identifier (SKI)
-        Clear-Variable -name "skiExtension" -ErrorAction SilentlyContinue
-        Clear-Variable -name "ski" -ErrorAction SilentlyContinue
-        $skiExtension = $cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Key Identifier" }
-        if ($skiExtension) {
-            $ski = ($skiExtension.Format($false) -replace " ", "").ToLower()
-        } else {
-            Write-Host "No SKI found in certificate."
-            $ski = $null
+        $allAltSecIDarray = foreach ($item in $allAltSecID) {
+            if ($item -is [System.Array]) {
+                foreach ($subitem in $item) {
+                    [string]$subitem
+                }
+            }
+            else {
+                [string]$item
+            }
         }
-
-        # Build SHA1 of Public Key
-        Clear-Variable -name "sha1Provider" -ErrorAction SilentlyContinue
-        Clear-Variable -name "publicKeyBytes" -ErrorAction SilentlyContinue
-        Clear-Variable -name "sha1Hash" -ErrorAction SilentlyContinue
-        Clear-Variable -name "sha1PublicKey" -ErrorAction SilentlyContinue
-        $sha1Provider = [System.Security.Cryptography.SHA1]::Create()
-        $publicKeyBytes = $cert.GetPublicKey()
-        $sha1Hash = $sha1Provider.ComputeHash($publicKeyBytes)
-        $sha1PublicKey = ($sha1Hash | ForEach-Object { $_.ToString("x2") }) -join ""
-
-        # Combine the built output into single attribute ready for applying to dummy AD computer
-        Clear-Variable -name "altSecurityIdentities" -ErrorAction SilentlyContinue
-        $altSecurityIdentities = @()
-        $altSecurityIdentities += "X509:<I>$issuerClean<SR>$serialReversed"
-        if ($ski) {
-            $altSecurityIdentities += "X509:<SKI>$ski"
-        }
-        $altSecurityIdentities += "X509:<SHA1-PUKEY>$sha1PublicKey"
-
-        # Write output to show built attribute
-        Write-Host "Generated AltSecurityIdentities entries:"
-        $altSecurityIdentities | ForEach-Object { Write-Host $_ }
     }
     elseif (!$cert) {
         # Write output if unable to get detailed data about the cert
@@ -265,7 +280,7 @@ foreach ($device in $(Get-MgDevice -Filter "trustType eq 'AzureAD'" -All <#| whe
     try {
         if (($adDevice = Get-ADComputer -Filter "Name -eq `"$($guid)`"" -SearchBase $orgUnit)) {
             # If computer object exists, set attributes
-            $adDevice | Set-ADComputer -Replace @{"dNSHostName"="$($guid)";"servicePrincipalName"="host/$($guid)";"sAMAccountName"="$($sAMAccountName)";"description"="$($device.DisplayName)";AltSecurityIdentities = $altSecurityIdentities}
+            $adDevice | Set-ADComputer -Replace @{"dNSHostName"="$($guid)";"servicePrincipalName"="host/$($guid)";"sAMAccountName"="$($sAMAccountName)";"description"="$($device.DisplayName)";AltSecurityIdentities = $allAltSecIDarray}
         } else {
             # Computer must not exist, create new and set attributes
             $adDevice = New-ADComputer -Name $guid -DNSHostName $guid -ServicePrincipalNames "host/$($guid)" -SAMAccountName $sAMAccountName -Description "$($device.DisplayName)" -Path $orgUnit -AccountPassword $NULL -PasswordNotRequired $False -PassThru
@@ -380,21 +395,21 @@ if (($aadDevices.Count -gt 0) -or (!$emptyDeviceProtection)) {
                         # Revoke certificates where CN = device ID across all certification authorities
                         # Using reason 6 (hold) to allow undo if necessary
                         try {
-                            foreach ($certAuthority in (Get-CertificationAuthority).ComputerName) {
-                                foreach ($cert in (Get-IssuedRequest -CertificationAuthority $certAuthority -Property SerialNumber -Filter "CommonName -eq $($device.Name)")) {
-                                    Write-Host "Revoking certificate $($cert.SerialNumber) for device $($device.Name)..."
+                            foreach ($certAuthority in Get-CertificationAuthority) {
+                                foreach ($cert in (Get-IssuedRequest -CertificationAuthority $certAuthority -Property SerialNumber -Filter "CommonName -eq $($device.DeviceID)")) {
+                                    Write-Host "Revoking certificate $($cert.SerialNumber) for device $($device.DisplayName)..."
                                     $cert | Revoke-Certificate -Reason "Hold"
                                 }
                             }
                         } catch {
-                            Write-Host "Something went wrong while revoking certificates for device $($device.Name)" -ForegroundColor Red
+                            Write-Host "Something went wrong while revoking certificates for device $($device.DeviceID)" -ForegroundColor Red
                         }
                     }
                 } else {
-                    Write-Host "Device $($device.Name) has not been removed from AD due to device deletion policy in script" -ForegroundColor Yellow
+                    Write-Host "Device $($device.DeviceID) has not been removed from AD due to device deletion policy in script" -ForegroundColor Yellow
                 }
             } catch {
-                Write-Host "Something went wrong while removing device $($device.Name)" -ForegroundColor Red
+                Write-Host "Something went wrong while removing device $($device.DeviceID)" -ForegroundColor Red
             }
         }
     }
